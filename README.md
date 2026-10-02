@@ -100,6 +100,8 @@ lesson-protocol-kinu/
 ├── LESSON_TEMPLATE.md        # copy-paste entry template
 ├── examples/
 │   └── sample-ledger.md      # worked examples in the ledger format
+├── tools/
+│   └── lesson.py             # add / lint / digest — the ledger tooling
 ├── LICENSE
 └── .gitignore
 ```
@@ -109,6 +111,7 @@ lesson-protocol-kinu/
 | `docs/protocol.md` | Doctrine § trigger, shape, gate, no-force, ledger, ownership |
 | `LESSON_TEMPLATE.md` | The four-part capture shape, ready to fill |
 | `examples/sample-ledger.md` | What committed lessons look like in practice |
+| `tools/lesson.py` | Auto-numbered capture, integrity lint, one-screen digest |
 
 **Markdown is canonical.** Any derived index (SQLite FTS5, embeddings) is a rebuildable cache — never edit the cache; edit the markdown and re-ingest.
 
@@ -122,6 +125,23 @@ lesson-protocol-kinu/
 4. **The gate is the feature.** What you refuse to write is what keeps the ledger worth reading.
 5. **Will over mandate.** The protocol is a reminder, not a compulsion loop.
 6. **Ownership is granted, not claimed.** Recording is the agent's job; ratification is the human's.
+
+---
+
+## The tool (`tools/lesson.py`)
+
+Python 3, stdlib only, no dependencies:
+
+```bash
+python tools/lesson.py add    --ledger path/to/ledger.md --title "..." \
+       --words "..." --reveal "..." --change "..." --worth "..."
+python tools/lesson.py lint   --ledger path/to/ledger.md
+python tools/lesson.py digest --ledger path/to/ledger.md -o digest.md
+```
+
+- **`add`** — auto-numbers the next free lesson and **refuses to commit an empty part** (the anti-noise gate, enforced).
+- **`lint`** — catches duplicate ids, broken append order, invalid dates, missing four-part fields, empty *The change*, and numbering gaps. Exit code 1 on errors, so it drops straight into CI.
+- **`digest`** — renders a `# | Date | Title` index: the read-side of the protocol, so a live session can recall the ledger without parsing 1,600 lines.
 
 ---
 
