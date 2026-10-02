@@ -94,6 +94,32 @@ def snapshot_copy(path: Path) -> Path:
     return target
 
 
+def cmd_recall(args) -> int:
+    """Case-insensitive search across ids, titles, and all four-part fields."""
+    path = Path(args.ledger)
+    if not path.exists():
+        print(f"recall: ledger not found: {path}", file=sys.stderr)
+        return 2
+    entries = parse(path.read_text(encoding=ENCODING))
+    q = args.query.casefold()
+    hits = [
+        e
+        for e in entries
+        if q in e["id"].casefold()
+        or q in e["title"].casefold()
+        or q in e["body"].casefold()
+    ]
+    if not hits:
+        print(f"no lessons match {args.query!r}", file=sys.stderr)
+        return 1
+    for e in hits:
+        print(f"## Lesson {e['id']} — {e['date']} — {e['title']}")
+        print(e["body"].strip())
+        print()
+    print(f"{len(hits)} of {len(entries)} lessons match {args.query!r}")
+    return 0
+
+
 def cmd_snapshot(args) -> int:
     path = Path(args.ledger)
     if not path.exists():
@@ -352,6 +378,11 @@ def main():
     )
     p.set_defaults(func=cmd_digest)
 
+    p = sub.add_parser("recall", parents=[common],
+                       help="case-insensitive search: ids, titles, four-part fields")
+    p.add_argument("query", help="search string (case-insensitive)")
+    p.set_defaults(func=cmd_recall)
+
     p = sub.add_parser("snapshot", parents=[common],
                        help="atomic dated copy into sibling backups/")
     p.set_defaults(func=cmd_snapshot)
@@ -366,7 +397,17 @@ def main():
     p.set_defaults(func=cmd_add)
 
     args = ap.parse_args()
-    sys.exit(args.func(args))
+    try:
+        code = args.func(args)
+        sys.stdout.flush()          # flush while we can still handle a closed pipe
+        sys.exit(code)
+    except BrokenPipeError:
+        # consumer closed the pipe early (e.g. `| head`): die quietly, not loudly
+        try:
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        except OSError:
+            pass
+        sys.exit(0)
 
 
 if __name__ == "__main__":
