@@ -16,6 +16,7 @@ The ledger is canonical; this tool never rewrites existing entries.
 
 import argparse
 import datetime
+import json
 import os
 import re
 import sys
@@ -63,6 +64,81 @@ def parse(text: str):
             }
         )
     return entries
+
+
+# --- status (ownership) ------------------------------------------------------
+# Ruling (2026-10-02): NO automatic promotion. Credit and verification are
+# granted, never assumed. Only an explicit `lesson.py status <id> <state>` by
+# the human applies a flip; the agent may suggest, never set.
+
+STATES = ("recorded", "credited", "promoted", "proven")
+
+
+def status_file(path: Path) -> Path:
+    """Sidecar: status is metadata, the ledger text stays append-only."""
+    return Path(str(path) + ".status.json")
+
+
+def load_status(path: Path, strict: bool) -> dict:
+    sf = status_file(path)
+    if not sf.exists():
+        return {}
+    try:
+        data = json.loads(sf.read_text(encoding=ENCODING))
+    except (json.JSONDecodeError, OSError) as exc:
+        if strict:
+            print(f"status: sidecar unreadable ({exc}) — refusing to touch it",
+                  file=sys.stderr)
+            sys.exit(2)
+        print(f"warning: status sidecar unreadable ({exc}); showing none",
+              file=sys.stderr)
+        return {}
+    if not isinstance(data, dict):
+        if strict:
+            print("status: sidecar malformed — refusing to touch it", file=sys.stderr)
+            sys.exit(2)
+        return {}
+    return data
+
+
+def cmd_status(args) -> int:
+    path = Path(args.ledger)
+    if not path.exists():
+        print(f"status: ledger not found: {path}", file=sys.stderr)
+        return 2
+    entries = parse(path.read_text(encoding=ENCODING))
+    ids = {e["id"] for e in entries}
+    if args.id not in ids:
+        print(f"status: unknown lesson id '{args.id}'", file=sys.stderr)
+        return 1
+
+    data = load_status(path, strict=True)
+    current = data.get(args.id, {}).get("status", "recorded")
+
+    # display mode — read-only, never creates or writes the sidecar
+    if args.state is None:
+        meta = data.get(args.id, {})
+        extra = f" (since {meta['changed']})" if meta.get("changed") else ""
+        print(f"Lesson {args.id}: {current}{extra}")
+        return 0
+
+    if args.state == current:
+        print(f"Lesson {args.id}: already '{current}' — no change")
+        return 0
+
+    data[args.id] = {
+        "status": args.state,
+        "changed": datetime.date.today().isoformat(),
+        "previous": current,
+    }
+    sf = status_file(path)
+    tmp = sf.with_name(sf.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n",
+                   encoding=ENCODING)
+    os.replace(tmp, sf)
+    print(f"Lesson {args.id}: {current} -> {args.state} "
+          f"({datetime.date.today().isoformat()}, by explicit command)")
+    return 0
 
 
 # --- commands ----------------------------------------------------------------
@@ -257,6 +333,7 @@ def cmd_digest(args) -> int:
         print(f"digest: ledger not found: {path}", file=sys.stderr)
         return 2
     entries = parse(path.read_text(encoding=ENCODING))
+    st = load_status(path, strict=False)  # display-only: warn, don't die
     if args.sort:
         # chronological/logical order on the read side — file order untouched
         entries.sort(key=lambda e: (e["date"].split("/")[0], id_key(e["id"])))
@@ -266,11 +343,12 @@ def cmd_digest(args) -> int:
         f"_{len(entries)} lessons · generated {datetime.date.today().isoformat()}"
         + (" · sorted" if args.sort else " · file order") + "_",
         "",
-        "| # | Date | Title |",
-        "|---|------|-------|",
+        "| # | Date | Title | Status |",
+        "|---|------|-------|--------|",
     ]
     for e in entries:
-        out.append(f"| {e['id']} | {e['date']} | {e['title']} |")
+        status = st.get(e["id"], {}).get("status", "recorded")
+        out.append(f"| {e['id']} | {e['date']} | {e['title']} | {status} |")
     text = "\n".join(out) + "\n"
     if args.output:
         Path(args.output).write_text(text, encoding="utf-8")
@@ -386,6 +464,13 @@ def main():
     p = sub.add_parser("snapshot", parents=[common],
                        help="atomic dated copy into sibling backups/")
     p.set_defaults(func=cmd_snapshot)
+
+    p = sub.add_parser("status", parents=[common],
+                       help="show or set ownership status (explicit command only)")
+    p.add_argument("id", help="lesson id (e.g. 12, 12b)")
+    p.add_argument("state", nargs="?", choices=STATES, default=None,
+                   help="new state — omitted: display current (read-only)")
+    p.set_defaults(func=cmd_status)
 
     p = sub.add_parser("add", parents=[common], help="append a lesson (auto-numbered)")
     p.add_argument("--title", required=True)

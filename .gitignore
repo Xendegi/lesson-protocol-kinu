@@ -10,5 +10,6 @@ Thumbs.db
 private/
 backups/
 *.local.md
+*.status.json
 .env
 __pycache__/

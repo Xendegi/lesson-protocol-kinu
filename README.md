@@ -150,12 +150,16 @@ python tools/lesson.py add      --ledger path/to/ledger.md --title "..." \
 python tools/lesson.py lint     --ledger path/to/ledger.md [--strict] [--refs]
 python tools/lesson.py digest   --ledger path/to/ledger.md [-o digest.md] [--sort]
 python tools/lesson.py snapshot --ledger path/to/ledger.md
+python tools/lesson.py recall   --ledger path/to/ledger.md "query"
+python tools/lesson.py status   --ledger path/to/ledger.md <id> [recorded|credited|promoted|proven]
 ```
 
 - **`add`** — auto-numbers the next free lesson and **refuses to commit an empty part** (the anti-noise gate, enforced). A **snapshot is taken automatically before every write** — if the snapshot fails, nothing is written.
 - **`lint`** — catches duplicate ids, invalid dates, missing four-part fields, empty *The change*, and numbering gaps. Exit code 1 on errors, so it drops straight into CI. Out-of-order ids are an **advisory warning** by default — append-only means historical layout stays immutable; add `--strict` to make warnings fail. Add `--refs` for **reference hygiene**: broken citations and ambiguous bare references (a bare `Lesson 12` when `12b` exists) are errors.
-- **`digest`** — renders a `# | Date | Title` index: the read-side of the protocol, so a live session can recall the ledger without parsing 1,600 lines. `--sort` gives chronological/logical order (file order untouched).
+- **`digest`** — renders a `# | Date | Title | Status` index: the read-side of the protocol, so a live session can recall the ledger without parsing 1,600 lines. `--sort` gives chronological/logical order (file order untouched).
 - **`snapshot`** — atomic dated copy of the ledger into a sibling `backups/` directory; same-day collisions get a timestamp, so nothing is ever overwritten. The Preservation Doctrine as code.
+- **`recall`** — case-insensitive search across ids, titles, and all four-part fields: the live-session lookup, so lessons are reachable and not just archived.
+- **`status`** — show (`status <id>`) or set (`status <id> <state>`) the ownership state in a sidecar file; the ledger text is never touched. **Only an explicit human command applies a flip** — the agent may suggest candidates, never set them. No automatic promotion, ever.
 - **Ids** are alphanumeric — digits with an optional lowercase suffix (`12`, `12b`). When a number collides, the chronologically later entry is suffixed rather than renumbered: nothing is ever erased or moved.
 
 ### Anonymity guard

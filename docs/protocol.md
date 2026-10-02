@@ -96,6 +96,14 @@ ownership starts; the human's credit is where it lands.
 on its own authority, and never presents a recorded lesson as an owned one
 before the credit step.
 
+**Mechanism (ruling, 2026-10-02):** ownership state lives in a sidecar next to
+the ledger (`<ledger>.status.json`) — `recorded → credited → promoted →
+proven` — so the append-only ledger text is never edited. The state changes
+**only** through the human's explicit `lesson.py status <id> <state>` command.
+The agent may suggest or flag candidates during reflection or in a digest, but
+never sets a state itself: no automatic promotion, no self-granted credit.
+A display call (`status <id>`) is read-only and never creates the sidecar.
+
 ---
 
 ## Anti-goals
