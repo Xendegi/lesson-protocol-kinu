@@ -1,0 +1,12 @@
+# OS
+Thumbs.db
+.DS_Store
+
+# Editors
+.vscode/
+.idea/
+
+# Local / private — the real ledger stays out of this repo
+private/
+*.local.md
+.env
