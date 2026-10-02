@@ -105,12 +105,13 @@ lesson-protocol-kinu/
 ├── examples/
 │   └── sample-ledger.md      # worked examples in the ledger format
 ├── tools/
-│   ├── lesson.py             # add / lint / digest / snapshot — the ledger tooling
-│   ├── check_anonymity.py    # exposure guard (tokens assembled at runtime)
+│   ├── lesson.py             # add / lint / digest / snapshot / recall / status — the ledger tooling
+│   ├── check_anonymity.py    # exposure + shape guard (tokens assembled at runtime)
+│   ├── test_lesson.py        # stdlib unittest suite (runs in CI)
 │   └── hooks/
 │       └── pre-commit        # blocks commits containing identity tokens
 ├── .github/workflows/
-│   └── anonymity-guard.yml   # CI: exposure scan + ledger self-test
+│   └── anonymity-guard.yml   # CI: exposure scan + unit tests + ledger self-test
 ├── .gitattributes            # hooks stay LF
 ├── LICENSE
 └── .gitignore
@@ -121,8 +122,9 @@ lesson-protocol-kinu/
 | `docs/protocol.md` | Doctrine § trigger, shape, gate, no-force, ledger, ownership |
 | `LESSON_TEMPLATE.md` | The four-part capture shape, ready to fill |
 | `examples/sample-ledger.md` | What committed lessons look like in practice |
-| `tools/lesson.py` | Auto-numbered capture (with pre-write snapshot), integrity + reference lint, one-screen digest |
-| `tools/check_anonymity.py` | The enforcement of the anonymity rule — tracked files and paths |
+| `tools/lesson.py` | Auto-numbered capture (with pre-write snapshot), integrity + reference lint, digest, recall, status sidecar, SHA-256 snapshot manifest |
+| `tools/check_anonymity.py` | The enforcement of the anonymity rule — tracked files and paths, plus the ledger-shape guard |
+| `tools/test_lesson.py` | The rulings, pinned as executable tests |
 | `.github/workflows/anonymity-guard.yml` | The same guard, run on every push |
 
 **Markdown is canonical.** Any derived index (SQLite FTS5, embeddings) is a rebuildable cache — never edit the cache; edit the markdown and re-ingest.
@@ -149,7 +151,7 @@ python tools/lesson.py add      --ledger path/to/ledger.md --title "..." \
        --words "..." --reveal "..." --change "..." --worth "..."
 python tools/lesson.py lint     --ledger path/to/ledger.md [--strict] [--refs]
 python tools/lesson.py digest   --ledger path/to/ledger.md [-o digest.md] [--sort]
-python tools/lesson.py snapshot --ledger path/to/ledger.md
+python tools/lesson.py snapshot --ledger path/to/ledger.md [--verify]
 python tools/lesson.py recall   --ledger path/to/ledger.md "query"
 python tools/lesson.py status   --ledger path/to/ledger.md <id> [recorded|credited|promoted|proven]
 ```
@@ -157,17 +159,26 @@ python tools/lesson.py status   --ledger path/to/ledger.md <id> [recorded|credit
 - **`add`** — auto-numbers the next free lesson and **refuses to commit an empty part** (the anti-noise gate, enforced). A **snapshot is taken automatically before every write** — if the snapshot fails, nothing is written.
 - **`lint`** — catches duplicate ids, invalid dates, missing four-part fields, empty *The change*, and numbering gaps. Exit code 1 on errors, so it drops straight into CI. Out-of-order ids are an **advisory warning** by default — append-only means historical layout stays immutable; add `--strict` to make warnings fail. Add `--refs` for **reference hygiene**: broken citations and ambiguous bare references (a bare `Lesson 12` when `12b` exists) are errors.
 - **`digest`** — renders a `# | Date | Title | Status` index: the read-side of the protocol, so a live session can recall the ledger without parsing 1,600 lines. `--sort` gives chronological/logical order (file order untouched).
-- **`snapshot`** — atomic dated copy of the ledger into a sibling `backups/` directory; same-day collisions get a timestamp, so nothing is ever overwritten. The Preservation Doctrine as code.
+- **`snapshot`** — atomic dated copy of the ledger — plus its status sidecar, when one exists — into a sibling `backups/` directory; same-day collisions get a timestamp, so nothing is ever overwritten. Both files' SHA-256 digests are appended to `backups/manifest.sha256`, and **`snapshot --verify`** checks every entry (hash present, hash matches); unlisted orphans are warnings. The Preservation Doctrine as code.
 - **`recall`** — case-insensitive search across ids, titles, and all four-part fields: the live-session lookup, so lessons are reachable and not just archived.
 - **`status`** — show (`status <id>`) or set (`status <id> <state>`) the ownership state in a sidecar file; the ledger text is never touched. **Only an explicit human command applies a flip** — the agent may suggest candidates, never set them. No automatic promotion, ever.
 - **Ids** are alphanumeric — digits with an optional lowercase suffix (`12`, `12b`). When a number collides, the chronologically later entry is suffixed rather than renumbered: nothing is ever erased or moved.
+
+### Tests
+
+`tools/test_lesson.py` — stdlib `unittest`, no dependencies — pins the rulings as executable behavior: the anti-noise gate on empty parts, snapshot-before-write abort on simulated I/O failure, the snapshot pair recorded in the manifest with real SHA-256s, broken and ambiguous references as errors, read-only display vs. explicit-command-only flips, corrupt-sidecar refusal without rewriting, and the anonymity scanner's token probes plus shape guard. CI runs the suite on every push:
+
+```bash
+python -m unittest discover -s tools -p "test_*.py"
+```
 
 ### Anonymity guard
 
 The publishing account is anonymous — so the rule is enforced, not remembered:
 
 - **`tools/check_anonymity.py`** — fails if identity tokens appear in any tracked file or path. Tokens are assembled at runtime, so the scanner itself stays clean.
-- **CI** (`.github/workflows/anonymity-guard.yml`) — runs the scan plus a sample-ledger self-test on every push and pull request.
+- **Shape guard** — names are not the only tell: any tracked file outside `examples/` and test fixtures that carries the four-part ledger marker shape beyond template density is blocked too, even when no identity token matches.
+- **CI** (`.github/workflows/anonymity-guard.yml`) — runs the scan, the unit-test suite, and a sample-ledger self-test on every push and pull request.
 - **Local hook** (`tools/hooks/pre-commit`, enabled with `git config core.hooksPath tools/hooks`) — blocks leaks before they even become commits.
 
 ---
@@ -176,7 +187,7 @@ The publishing account is anonymous — so the rule is enforced, not remembered:
 
 The protocol is deliberately file-native — it works with any agent harness that can read and append markdown:
 
-1. **Wake hook** — point your workspace instructions (`AGENTS.md`, system prompt) at the protocol file so it loads at session start.
+1. **Wake hook** — point your workspace instructions (`AGENTS.md`, system prompt) at the protocol file so it loads at session start. A quiet, read-only `lint --refs` health line at wake is permitted — a single line when green, a concise alert when degraded — with **zero auto-remediation**: the tool reports; it never rewrites.
 2. **Ledger file** — one append-only markdown file; the template enforces the shape.
 3. **Day log** — a separate episodic log for chatter the gate rejects. Nothing is lost; it simply doesn't enter the ledger.
 4. **Promotion path** — durable, repeatedly-proven lessons may be promoted into core instruction files — by the human, not the agent.

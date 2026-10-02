@@ -16,6 +16,7 @@ The ledger is canonical; this tool never rewrites existing entries.
 
 import argparse
 import datetime
+import hashlib
 import json
 import os
 import re
@@ -134,7 +135,7 @@ def cmd_status(args) -> int:
     sf = status_file(path)
     tmp = sf.with_name(sf.name + ".tmp")
     tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n",
-                   encoding=ENCODING)
+                   encoding="utf-8")  # reads tolerate BOM; writes never add one
     os.replace(tmp, sf)
     print(f"Lesson {args.id}: {current} -> {args.state} "
           f"({datetime.date.today().isoformat()}, by explicit command)")
@@ -144,11 +145,19 @@ def cmd_status(args) -> int:
 # --- commands ----------------------------------------------------------------
 
 
+def _sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
 def snapshot_copy(path: Path) -> Path:
-    """Atomic dated copy of the ledger into a sibling backups/ directory.
+    """Atomic dated copy of the ledger — plus its status sidecar, if any —
+    into a sibling backups/ directory, recorded in manifest.sha256.
 
     Preservation Doctrine as code: siblings, never overwrites. Same-day
     collisions get a timestamp (then a counter), so nothing is ever replaced.
+    Each file is written via temp + atomic rename; the manifest append comes
+    last and records the pair as a unit — a crash mid-pair leaves an orphan
+    that `snapshot --verify` reports instead of a silent half-backup.
     """
     if not path.exists():
         raise FileNotFoundError(path)
@@ -156,18 +165,72 @@ def snapshot_copy(path: Path) -> Path:
     backups.mkdir(parents=True, exist_ok=True)
     now = datetime.datetime.now()
     stem = path.stem
-    target = backups / f"{stem}.{now.strftime('%Y-%m-%d')}.md"
+    base = f"{stem}.{now.strftime('%Y-%m-%d')}"
+    target = backups / f"{base}.md"
     if target.exists():
-        target = backups / f"{stem}.{now.strftime('%Y-%m-%d.%H%M%S')}.md"
+        base = f"{stem}.{now.strftime('%Y-%m-%d.%H%M%S')}"
+        target = backups / f"{base}.md"
         i = 1
         while target.exists():
-            target = backups / f"{stem}.{now.strftime('%Y-%m-%d.%H%M%S')}.{i}.md"
+            target = backups / f"{base}.{i}.md"
             i += 1
+
+    manifest_lines = []
+
     data = path.read_bytes()          # exact bytes — no re-encoding
     tmp = target.with_name(target.name + ".tmp")
     tmp.write_bytes(data)             # write beside target, then atomic swap
     os.replace(tmp, target)
+    manifest_lines.append(f"{_sha256(data)}  {target.name}")
+
+    sc = status_file(path)            # the pair: ownership sidecar, if present
+    if sc.exists():
+        sc_data = sc.read_bytes()
+        sc_target = backups / f"{target.stem}.status.json"
+        tmp = sc_target.with_name(sc_target.name + ".tmp")
+        tmp.write_bytes(sc_data)
+        os.replace(tmp, sc_target)
+        manifest_lines.append(f"{_sha256(sc_data)}  {sc_target.name}")
+
+    manifest = backups / "manifest.sha256"
+    with manifest.open("a", encoding="utf-8") as fh:
+        fh.write("\n".join(manifest_lines) + "\n")
     return target
+
+
+def verify_manifest(path: Path) -> int:
+    """Check every manifest entry: file exists and hash matches. Orphans warn."""
+    backups = path.parent / "backups"
+    manifest = backups / "manifest.sha256"
+    if not manifest.exists():
+        print("verify: no manifest yet (no snapshots since manifest support)")
+        return 0
+    errors, warnings, listed = [], [], set()
+    for line in manifest.read_text(encoding=ENCODING).splitlines():
+        if not line.strip():
+            continue
+        digest, sep, name = line.partition("  ")
+        if not sep:
+            errors.append(f"manifest line malformed: {line!r}")
+            continue
+        listed.add(name)
+        f = backups / name
+        if not f.exists():
+            errors.append(f"missing snapshot file: {name}")
+        elif _sha256(f.read_bytes()) != digest:
+            errors.append(f"HASH MISMATCH (corrupted or altered): {name}")
+    for f in sorted(backups.iterdir()):
+        if f.name == "manifest.sha256" or f.name.endswith(".tmp"):
+            continue
+        if f.name not in listed:
+            warnings.append(f"unlisted file (orphan or failed pair): {f.name}")
+    for w in warnings:
+        print(f"WARN  {w}")
+    for e in errors:
+        print(f"ERROR {e}")
+    print(f"verify: {len(listed)} entr(ies) checked — "
+          f"{len(errors)} error(s), {len(warnings)} warning(s)")
+    return 1 if errors else 0
 
 
 def cmd_recall(args) -> int:
@@ -201,9 +264,17 @@ def cmd_snapshot(args) -> int:
     if not path.exists():
         print(f"snapshot: ledger not found: {path}", file=sys.stderr)
         return 2
-    target = snapshot_copy(path)
+    if args.verify:
+        return verify_manifest(path)
+    try:
+        target = snapshot_copy(path)
+    except Exception as exc:  # noqa: BLE001 — report, never traceback
+        print(f"snapshot: failed ({exc}); nothing written", file=sys.stderr)
+        return 2
     size = target.stat().st_size
-    print(f"snapshot → {target} ({size} bytes)")
+    sc_target = path.parent / "backups" / f"{target.stem}.status.json"
+    pair = f" + {sc_target.name}" if sc_target.exists() else ""
+    print(f"snapshot → {target} ({size} bytes){pair}; manifest updated")
     return 0
 
 
@@ -463,6 +534,8 @@ def main():
 
     p = sub.add_parser("snapshot", parents=[common],
                        help="atomic dated copy into sibling backups/")
+    p.add_argument("--verify", action="store_true",
+                   help="check manifest.sha256: hashes match, files present")
     p.set_defaults(func=cmd_snapshot)
 
     p = sub.add_parser("status", parents=[common],

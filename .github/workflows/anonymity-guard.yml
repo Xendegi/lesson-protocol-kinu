@@ -19,6 +19,9 @@ jobs:
       - name: Exposure scan (tracked files + paths)
         run: python tools/check_anonymity.py
 
+      - name: Unit tests (stdlib unittest, no dependencies)
+        run: python -m unittest discover -s tools -p "test_*.py" -v
+
       - name: Ledger tooling self-test (sample ledger)
         run: |
           python tools/lesson.py lint --refs --ledger examples/sample-ledger.md

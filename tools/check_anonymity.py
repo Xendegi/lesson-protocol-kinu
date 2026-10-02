@@ -48,6 +48,39 @@ for _lit, _bounded, _label in _tokens():
         _pat = r"\b" + _pat + r"\b"
     TOKENS.append((re.compile(_pat, re.I), _label))
 
+# --- structural guard (ledger shape) -----------------------------------------
+# Ruling (2026-10-02): block commits containing ledger marker density outside
+# examples/ and test fixtures, regardless of whether name tokens match — a
+# personal ledger with no identity tokens must not slip through either.
+
+LEDGER_MARKERS = (
+    "**" + "His words" + ":**",
+    "**" + "The reveal" + ":**",
+    "**" + "The change" + ":**",
+    "**" + "The worth" + ":**",
+)
+SHAPE_EXEMPT_PREFIX = ("examples/", "fixtures/", "tools/tests/")
+SHAPE_EXEMPT_NAMES = ("LESSON_TEMPLATE.md",)
+SHAPE_THRESHOLD = 3          # more than 3 of any single marker = ledger-shaped
+
+
+def shape_violation(rel: str, text: str):
+    """Return a message if `text` looks like a ledger outside allowed paths."""
+    norm = rel.replace("\\", "/")
+    name = Path(rel).name
+    if name in SHAPE_EXEMPT_NAMES or name.startswith("test_"):
+        return None
+    if any(norm.startswith(p) for p in SHAPE_EXEMPT_PREFIX):
+        return None
+    for marker in LEDGER_MARKERS:
+        count = text.count(marker)
+        if count > SHAPE_THRESHOLD:
+            return (
+                f"ledger-shaped file: {marker} appears {count}x "
+                f"(max {SHAPE_THRESHOLD} outside {', '.join(SHAPE_EXEMPT_PREFIX)})"
+            )
+    return None
+
 
 def tracked_files() -> list[str]:
     r = subprocess.run(
@@ -82,12 +115,17 @@ def main() -> int:
         if len(data) > MAX_FILE_BYTES:
             continue
         scanned += 1
+        text = decode(data)
         # 2) file contents line by line
-        for lineno, line in enumerate(decode(data).splitlines(), 1):
+        for lineno, line in enumerate(text.splitlines(), 1):
             for rx, label in TOKENS:
                 if rx.search(line):
                     snippet = line.strip()[:120]
                     hits.append((rel, lineno, label, snippet))
+        # 3) structural: ledger-shaped content outside allowed locations
+        shape = shape_violation(rel, text)
+        if shape:
+            hits.append((rel, 0, "structure", shape))
 
     if hits:
         print("EXPOSURE DETECTED — commit/push blocked:\n", file=sys.stderr)
