@@ -1,0 +1,26 @@
+name: anonymity-guard
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Exposure scan (tracked files + paths)
+        run: python tools/check_anonymity.py
+
+      - name: Ledger tooling self-test (sample ledger)
+        run: |
+          python tools/lesson.py lint --refs --ledger examples/sample-ledger.md
+          python tools/lesson.py digest --ledger examples/sample-ledger.md --sort -o /tmp/digest.md
+          python tools/lesson.py snapshot --ledger examples/sample-ledger.md

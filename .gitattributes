@@ -1,0 +1,2 @@
+# Hooks must stay LF — sh cannot run CRLF scripts
+tools/hooks/* text eol=lf

@@ -6,7 +6,9 @@ Thumbs.db
 .vscode/
 .idea/
 
-# Local / private — the real ledger stays out of this repo
+# Local / private — the real ledger and its safety copies stay out of this repo
 private/
+backups/
 *.local.md
 .env
+__pycache__/

@@ -105,7 +105,13 @@ lesson-protocol-kinu/
 ├── examples/
 │   └── sample-ledger.md      # worked examples in the ledger format
 ├── tools/
-│   └── lesson.py             # add / lint / digest — the ledger tooling
+│   ├── lesson.py             # add / lint / digest / snapshot — the ledger tooling
+│   ├── check_anonymity.py    # exposure guard (tokens assembled at runtime)
+│   └── hooks/
+│       └── pre-commit        # blocks commits containing identity tokens
+├── .github/workflows/
+│   └── anonymity-guard.yml   # CI: exposure scan + ledger self-test
+├── .gitattributes            # hooks stay LF
 ├── LICENSE
 └── .gitignore
 ```
@@ -115,7 +121,9 @@ lesson-protocol-kinu/
 | `docs/protocol.md` | Doctrine § trigger, shape, gate, no-force, ledger, ownership |
 | `LESSON_TEMPLATE.md` | The four-part capture shape, ready to fill |
 | `examples/sample-ledger.md` | What committed lessons look like in practice |
-| `tools/lesson.py` | Auto-numbered capture, integrity lint, one-screen digest |
+| `tools/lesson.py` | Auto-numbered capture (with pre-write snapshot), integrity + reference lint, one-screen digest |
+| `tools/check_anonymity.py` | The enforcement of the anonymity rule — tracked files and paths |
+| `.github/workflows/anonymity-guard.yml` | The same guard, run on every push |
 
 **Markdown is canonical.** Any derived index (SQLite FTS5, embeddings) is a rebuildable cache — never edit the cache; edit the markdown and re-ingest.
 
@@ -137,16 +145,26 @@ lesson-protocol-kinu/
 Python 3, stdlib only, no dependencies:
 
 ```bash
-python tools/lesson.py add    --ledger path/to/ledger.md --title "..." \
+python tools/lesson.py add      --ledger path/to/ledger.md --title "..." \
        --words "..." --reveal "..." --change "..." --worth "..."
-python tools/lesson.py lint   --ledger path/to/ledger.md [--strict]
-python tools\lesson.py digest --ledger path/to/ledger.md [-o digest.md] [--sort]
+python tools/lesson.py lint     --ledger path/to/ledger.md [--strict] [--refs]
+python tools/lesson.py digest   --ledger path/to/ledger.md [-o digest.md] [--sort]
+python tools/lesson.py snapshot --ledger path/to/ledger.md
 ```
 
-- **`add`** — auto-numbers the next free lesson and **refuses to commit an empty part** (the anti-noise gate, enforced).
-- **`lint`** — catches duplicate ids, invalid dates, missing four-part fields, empty *The change*, and numbering gaps. Exit code 1 on errors, so it drops straight into CI. Out-of-order ids are an **advisory warning** by default — append-only means historical layout stays immutable; add `--strict` to make warnings fail.
+- **`add`** — auto-numbers the next free lesson and **refuses to commit an empty part** (the anti-noise gate, enforced). A **snapshot is taken automatically before every write** — if the snapshot fails, nothing is written.
+- **`lint`** — catches duplicate ids, invalid dates, missing four-part fields, empty *The change*, and numbering gaps. Exit code 1 on errors, so it drops straight into CI. Out-of-order ids are an **advisory warning** by default — append-only means historical layout stays immutable; add `--strict` to make warnings fail. Add `--refs` for **reference hygiene**: broken citations and ambiguous bare references (a bare `Lesson 12` when `12b` exists) are errors.
 - **`digest`** — renders a `# | Date | Title` index: the read-side of the protocol, so a live session can recall the ledger without parsing 1,600 lines. `--sort` gives chronological/logical order (file order untouched).
+- **`snapshot`** — atomic dated copy of the ledger into a sibling `backups/` directory; same-day collisions get a timestamp, so nothing is ever overwritten. The Preservation Doctrine as code.
 - **Ids** are alphanumeric — digits with an optional lowercase suffix (`12`, `12b`). When a number collides, the chronologically later entry is suffixed rather than renumbered: nothing is ever erased or moved.
+
+### Anonymity guard
+
+The publishing account is anonymous — so the rule is enforced, not remembered:
+
+- **`tools/check_anonymity.py`** — fails if identity tokens appear in any tracked file or path. Tokens are assembled at runtime, so the scanner itself stays clean.
+- **CI** (`.github/workflows/anonymity-guard.yml`) — runs the scan plus a sample-ledger self-test on every push and pull request.
+- **Local hook** (`tools/hooks/pre-commit`, enabled with `git config core.hooksPath tools/hooks`) — blocks leaks before they even become commits.
 
 ---
 

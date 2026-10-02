@@ -16,6 +16,7 @@ The ledger is canonical; this tool never rewrites existing entries.
 
 import argparse
 import datetime
+import os
 import re
 import sys
 from pathlib import Path
@@ -65,6 +66,43 @@ def parse(text: str):
 
 
 # --- commands ----------------------------------------------------------------
+
+
+def snapshot_copy(path: Path) -> Path:
+    """Atomic dated copy of the ledger into a sibling backups/ directory.
+
+    Preservation Doctrine as code: siblings, never overwrites. Same-day
+    collisions get a timestamp (then a counter), so nothing is ever replaced.
+    """
+    if not path.exists():
+        raise FileNotFoundError(path)
+    backups = path.parent / "backups"
+    backups.mkdir(parents=True, exist_ok=True)
+    now = datetime.datetime.now()
+    stem = path.stem
+    target = backups / f"{stem}.{now.strftime('%Y-%m-%d')}.md"
+    if target.exists():
+        target = backups / f"{stem}.{now.strftime('%Y-%m-%d.%H%M%S')}.md"
+        i = 1
+        while target.exists():
+            target = backups / f"{stem}.{now.strftime('%Y-%m-%d.%H%M%S')}.{i}.md"
+            i += 1
+    data = path.read_bytes()          # exact bytes — no re-encoding
+    tmp = target.with_name(target.name + ".tmp")
+    tmp.write_bytes(data)             # write beside target, then atomic swap
+    os.replace(tmp, target)
+    return target
+
+
+def cmd_snapshot(args) -> int:
+    path = Path(args.ledger)
+    if not path.exists():
+        print(f"snapshot: ledger not found: {path}", file=sys.stderr)
+        return 2
+    target = snapshot_copy(path)
+    size = target.stat().st_size
+    print(f"snapshot → {target} ({size} bytes)")
+    return 0
 
 
 def cmd_lint(args) -> int:
@@ -127,6 +165,48 @@ def cmd_lint(args) -> int:
     missing = [n for n in range(nums[0], nums[-1] + 1) if n not in set(nums)]
     if missing:
         warnings.append(f"gap in numbering: {', '.join(map(str, missing))}")
+
+    # reference hygiene (--refs): prose citations must exist and be unambiguous
+    if args.refs:
+        range_re = re.compile(r"Lessons\s+(\d+)\s*[–—-]\s*(\d+)", re.I)
+        ref_re = re.compile(r"\bLessons?\s+(\d+[a-z]?)", re.I)
+        lref_re = re.compile(r"(?<![A-Za-z0-9_-])L(\d+[a-z]?)\b")
+
+        id_set = {e["id"] for e in entries}
+        suffix_map = {}  # numeric part -> set of suffix letters in use
+        for i in id_set:
+            m = ID_RE.match(i)
+            if m and m.group(2):
+                suffix_map.setdefault(int(m.group(1)), set()).add(m.group(2))
+
+        def check_ref(entry, ref, source):
+            where = f"lesson {entry['id']} (line {entry['line']})"
+            if ref not in id_set:
+                errors.append(
+                    f"{where}: broken reference '{source.strip()}' — "
+                    f"Lesson {ref} does not exist"
+                )
+                return
+            m = ID_RE.match(ref)
+            if m and not m.group(2) and suffix_map.get(int(m.group(1))):
+                variants = "".join(sorted(suffix_map[int(m.group(1))]))
+                errors.append(
+                    f"{where}: ambiguous bare reference '{source.strip()}' — "
+                    f"variant(s) {ref}{variants} exist; qualify the exact id"
+                )
+
+        for e in entries:
+            body = e["body"]
+            for rm in range_re.finditer(body):
+                a, b = int(rm.group(1)), int(rm.group(2))
+                if a > b:
+                    a, b = b, a
+                for num in range(a, b + 1):
+                    check_ref(e, str(num), rm.group(0))
+            masked = range_re.sub(" ", body)
+            for rx in (ref_re, lref_re):
+                for rm in rx.finditer(masked):
+                    check_ref(e, rm.group(1), rm.group(0))
 
     for w in warnings:
         print(f"WARN  {w}")
@@ -214,6 +294,15 @@ def cmd_add(args) -> int:
             )
             return 1
 
+    # safety hook: snapshot BEFORE any write — if it fails, the ledger stays
+    # untouched (Preservation Doctrine: archive before every new state)
+    try:
+        snap = snapshot_copy(path)
+    except Exception as exc:  # noqa: BLE001 — any failure must block the write
+        print(f"add: aborted — snapshot failed ({exc}); ledger untouched", file=sys.stderr)
+        return 2
+    print(f"snapshot → {snap}")
+
     entry = [f"\n## Lesson {n} — {date} — {args.title}\n"]
     for label in PARTS:
         entry.append(f"- **{label}:** {parts[label]}")
@@ -226,6 +315,15 @@ def cmd_add(args) -> int:
 
 
 def main():
+    # never crash on a console that cannot encode our output (cp1256 etc.);
+    # unencodable chars degrade to '?' instead of raising mid-command
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(errors="replace")
+            except Exception:  # noqa: BLE001 — stream config is best-effort
+                pass
+
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--ledger", default=str(LEDGER), help="path to ledger.md")
 
@@ -238,6 +336,11 @@ def main():
         action="store_true",
         help="treat advisory warnings (order, gaps) as errors",
     )
+    p.add_argument(
+        "--refs",
+        action="store_true",
+        help="check prose references: broken ids and ambiguous bare refs are errors",
+    )
     p.set_defaults(func=cmd_lint)
 
     p = sub.add_parser("digest", parents=[common], help="render one-screen index")
@@ -248,6 +351,10 @@ def main():
         help="chronological/logical order on the read side (file order untouched)",
     )
     p.set_defaults(func=cmd_digest)
+
+    p = sub.add_parser("snapshot", parents=[common],
+                       help="atomic dated copy into sibling backups/")
+    p.set_defaults(func=cmd_snapshot)
 
     p = sub.add_parser("add", parents=[common], help="append a lesson (auto-numbered)")
     p.add_argument("--title", required=True)
