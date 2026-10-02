@@ -233,25 +233,55 @@ def verify_manifest(path: Path) -> int:
     return 1 if errors else 0
 
 
+# recall ranking (deterministic): exact id > title > four-part field > prose
+S_ID, S_TITLE, S_FIELD, S_PROSE = 400, 300, 200, 100
+
+
+def match_score(q: str, e: dict) -> int:
+    """Rank tier of one entry against a casefolded query; 0 = no match.
+
+    Ties are broken by id_key descending (most recent lesson first) at sort
+    time — this stays a pure function so each tier is testable on its own.
+    """
+    if not q:
+        return 0
+    if q == e["id"].casefold():
+        return S_ID
+    best = 0
+    if q in e["title"].casefold():
+        best = S_TITLE
+    folded = e["body"].casefold()
+    positions = [m.start() for m in re.finditer(re.escape(q), folded)]
+    if positions:
+        # a hit at/after the first field marker lives inside the four-part
+        # shape; anything before it (or a markerless body) is general prose
+        first_marker = folded.find("- **")
+        in_field = first_marker != -1 and max(positions) >= first_marker
+        best = max(best, S_FIELD if in_field else S_PROSE)
+    if q in e["id"].casefold():
+        best = max(best, S_PROSE)          # partial id ("12" inside "12b")
+    if q in e["date"].casefold():
+        best = max(best, S_PROSE)
+    return best
+
+
 def cmd_recall(args) -> int:
-    """Case-insensitive search across ids, titles, and all four-part fields."""
+    """Ranked search: exact id > title > four-part field > prose, ties newest."""
     path = Path(args.ledger)
     if not path.exists():
         print(f"recall: ledger not found: {path}", file=sys.stderr)
         return 2
     entries = parse(path.read_text(encoding=ENCODING))
     q = args.query.casefold()
-    hits = [
-        e
-        for e in entries
-        if q in e["id"].casefold()
-        or q in e["title"].casefold()
-        or q in e["body"].casefold()
-    ]
+    hits = [t for t in ((match_score(q, e), e) for e in entries) if t[0] > 0]
     if not hits:
         print(f"no lessons match {args.query!r}", file=sys.stderr)
         return 1
-    for e in hits:
+    # deterministic: most recent first within equal scores (two stable
+    # passes — id desc, then score desc — keep id order inside every tie)
+    hits.sort(key=lambda t: id_key(t[1]["id"]), reverse=True)
+    hits.sort(key=lambda t: t[0], reverse=True)
+    for _, e in hits:
         print(f"## Lesson {e['id']} — {e['date']} — {e['title']}")
         print(e["body"].strip())
         print()
@@ -275,6 +305,116 @@ def cmd_snapshot(args) -> int:
     sc_target = path.parent / "backups" / f"{target.stem}.status.json"
     pair = f" + {sc_target.name}" if sc_target.exists() else ""
     print(f"snapshot → {target} ({size} bytes){pair}; manifest updated")
+    return 0
+
+
+def cmd_restore(args) -> int:
+    """Restore a snapshot pair over the live ledger — jailed, verified,
+    confirmed, and snapshot-first. Guardrails (ruling, 2026-10-03):
+
+    1. Jail: the target must be a plain file name resolving inside backups/.
+    2. Integrity: every file to be written must be listed in manifest.sha256
+       and hash-match it; otherwise abort (no manifest = no trust).
+    3. Confirmation: interactive [y/N], or --yes for non-interactive use.
+    4. Snapshot-first: the current working pair is snapshotted before the
+       restore touches either working file.
+    5. Atomic pair swap: both targets staged via temp files, then swapped
+       with os.replace; the ledger lands last. Re-verified after landing.
+    """
+    path = Path(args.ledger)
+    if not path.exists():
+        print(f"restore: ledger not found: {path}", file=sys.stderr)
+        return 2
+    backups = path.parent / "backups"
+
+    # 1) jail — plain name only; resolves strictly inside backups/
+    target = Path(args.target)
+    if target.is_absolute() or len(target.parts) != 1 or ".." in target.parts:
+        print(f"restore: refusing target — must be a plain snapshot name "
+              f"inside backups/ ({args.target!r})", file=sys.stderr)
+        return 1
+    snap = backups / target.name
+    if snap.resolve().parent != backups.resolve():
+        print(f"restore: refusing target — must be a plain snapshot name "
+              f"inside backups/ ({args.target!r})", file=sys.stderr)
+        return 1
+    if not snap.is_file():
+        print(f"restore: snapshot not found: {target.name}", file=sys.stderr)
+        return 1
+
+    # 2) integrity — manifest must list and match every file we would write
+    manifest = backups / "manifest.sha256"
+    if not manifest.exists():
+        print("restore: manifest.sha256 missing — cannot verify; "
+              "aborting", file=sys.stderr)
+        return 1
+    entries = {}
+    for line in manifest.read_text(encoding=ENCODING).splitlines():
+        if line.strip():
+            digest, sep, name = line.partition("  ")
+            if sep:
+                entries[name] = digest
+    if target.name not in entries:
+        print(f"restore: no manifest entry for {target.name!r} — "
+              f"unverifiable, aborting", file=sys.stderr)
+        return 1
+    if _sha256(snap.read_bytes()) != entries[target.name]:
+        print(f"restore: HASH MISMATCH for {target.name!r} — "
+              f"does not match manifest, aborting", file=sys.stderr)
+        return 1
+    # the pair's sidecar, if the snapshot carries one — same strictness
+    sc_name = f"{snap.stem}.status.json"
+    sc_snap = backups / sc_name
+    pair_note = " (no sidecar in snapshot — working sidecar untouched)"
+    if sc_snap.exists():
+        if sc_name not in entries:
+            print(f"restore: sidecar {sc_name!r} has no manifest entry — "
+                  f"unverifiable, aborting", file=sys.stderr)
+            return 1
+        if _sha256(sc_snap.read_bytes()) != entries[sc_name]:
+            print(f"restore: HASH MISMATCH for {sc_name!r} — "
+                  f"does not match manifest, aborting", file=sys.stderr)
+            return 1
+        pair_note = " + sidecar (pair swapped)"
+
+    # 3) confirmation guard — [y/N] unless --yes
+    if not args.yes:
+        try:
+            answer = input(f"restore {target.name} over {path.name}? [y/N] ")
+        except (EOFError, KeyboardInterrupt):
+            print(file=sys.stderr)
+            answer = ""
+        if answer.strip().casefold() not in ("y", "yes"):
+            print("restore: cancelled — nothing changed", file=sys.stderr)
+            return 1
+
+    # 4) snapshot-first — current working pair preserved before any write
+    try:
+        pre = snapshot_copy(path)
+    except Exception as exc:  # noqa: BLE001 — any failure must block the write
+        print(f"restore: pre-restore snapshot failed ({exc}); aborting",
+              file=sys.stderr)
+        return 2
+
+    # 5) atomic pair swap — stage both, then swap; ledger lands last
+    md_tmp = path.with_name(path.name + ".restore-tmp")
+    md_tmp.write_bytes(snap.read_bytes())
+    sc_working = status_file(path)
+    sc_tmp = None
+    if sc_snap.exists():
+        sc_tmp = sc_working.with_name(sc_working.name + ".restore-tmp")
+        sc_tmp.write_bytes(sc_snap.read_bytes())
+    if sc_tmp is not None:
+        os.replace(sc_tmp, sc_working)   # metadata first ...
+    os.replace(md_tmp, path)             # ... ledger last = commit moment
+
+    # 6) post-restore verification — what landed is what the manifest names
+    if _sha256(path.read_bytes()) != entries[target.name]:
+        print("restore: post-restore verification FAILED — pre-restore copy "
+              f"holds at {pre.name}", file=sys.stderr)
+        return 2
+    print(f"restore: {target.name} → {path} —{pair_note} verified against "
+          f"manifest (pre-restore copy: {pre.name})")
     return 0
 
 
@@ -537,6 +677,14 @@ def main():
     p.add_argument("--verify", action="store_true",
                    help="check manifest.sha256: hashes match, files present")
     p.set_defaults(func=cmd_snapshot)
+
+    p = sub.add_parser("restore", parents=[common],
+                       help="restore a snapshot pair over the live ledger (guarded)")
+    p.add_argument("target", help="snapshot file name inside backups/ "
+                                  "(plain name — no paths)")
+    p.add_argument("--yes", action="store_true",
+                   help="skip the interactive [y/N] confirmation")
+    p.set_defaults(func=cmd_restore)
 
     p = sub.add_parser("status", parents=[common],
                        help="show or set ownership status (explicit command only)")
