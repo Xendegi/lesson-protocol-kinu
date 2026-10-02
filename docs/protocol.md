@@ -106,4 +106,4 @@ before the credit step.
 - ❌ Storing everything "just in case" — the gate is the feature.
 - ❌ Rewording the teacher's quotes for style — verbatim is sacred.
 - ❌ Deleting or rewriting old lessons — the ledger is append-only; errors are
-  corrected by a follow-up lesson, never by erasure.
+  corrected by a follow-up lesson or a suffix (`12b`), never by erasure.
