@@ -492,7 +492,7 @@ def cmd_lint(args) -> int:
             if m and m.group(2):
                 suffix_map.setdefault(int(m.group(1)), set()).add(m.group(2))
 
-        def check_ref(entry, ref, source):
+        def check_ref(entry, ref, source, qualified=False):
             where = f"lesson {entry['id']} (line {entry['line']})"
             if ref not in id_set:
                 errors.append(
@@ -501,7 +501,7 @@ def cmd_lint(args) -> int:
                 )
                 return
             m = ID_RE.match(ref)
-            if m and not m.group(2) and suffix_map.get(int(m.group(1))):
+            if m and not m.group(2) and suffix_map.get(int(m.group(1))) and not qualified:
                 variants = "".join(sorted(suffix_map[int(m.group(1))]))
                 errors.append(
                     f"{where}: ambiguous bare reference '{source.strip()}' — "
@@ -519,7 +519,12 @@ def cmd_lint(args) -> int:
             masked = range_re.sub(" ", body)
             for rx in (ref_re, lref_re):
                 for rm in rx.finditer(masked):
-                    check_ref(e, rm.group(1), rm.group(0))
+                    # a title or bracket right after the id qualifies it:
+                    # `Lesson 12 ("<title>")` names the original of a numbered
+                    # pair without renaming a sealed id to suit a regex.
+                    tail = masked[rm.end():rm.end() + 8]
+                    qualified = bool(re.match(r"\s*(?:[\(\[\{]|[\"'«]|[—–-]\s*[\"'«])", tail))
+                    check_ref(e, rm.group(1), rm.group(0), qualified)
 
     for w in warnings:
         print(f"WARN  {w}")

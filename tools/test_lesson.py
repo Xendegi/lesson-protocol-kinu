@@ -147,6 +147,15 @@ class TestLint(TempLedger):
         # without --refs the reference checks stay out of the way
         self.assertEqual(self.cli("lint").returncode, 0)
 
+    def test_refs_qualified_by_following_title_are_accepted(self):
+        body = entry("1") + entry("12") + entry("12b")
+        body = body.replace(
+            "- **The worth:** v",
+            '- **The worth:** v — see Lesson 12 ("the first take") for the original', 1)
+        self.ledger.write_text(body, encoding="utf-8")
+        r = self.cli("lint", "--refs")
+        self.assertEqual(r.returncode, 0, r.stdout)
+
     def test_sample_ledger_green(self):
         r = run("lint", "--refs", "--ledger", str(SAMPLE))
         self.assertEqual(r.returncode, 0, r.stdout)
